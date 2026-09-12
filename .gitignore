@@ -1,0 +1,5 @@
+# Bewusst minimal gehalten: dieses Repo soll den vollständigen Stand
+# mitsamt Secrets, Keys und Caches aufnehmen.
+# Einzige Ausnahme: node_modules/ (aktuell nicht vorhanden, nur Absicherung
+# falls später npm install im omniroute/-Ordner läuft).
+node_modules/
