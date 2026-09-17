@@ -90,7 +90,15 @@ Weitere Skripte in `omniroute/package.json` (u. a. `build`,
 ## Verbindung der beiden Teile
 
 Schaltwerk schreibt geprüfte Proxies über die Management-API nach OmniRoute.
-Der Endpunkt ist **nicht** im Code hinterlegt, sondern wird zur Laufzeit in der
-Oberfläche gesetzt (`http://127.0.0.1:24615`). Der API-Key wird ebenfalls nur
-zur Laufzeit gehalten und **nicht persistiert** — nach jedem Neustart von
-Schaltwerk neu eintragen.
+Der Endpunkt wird zur Laufzeit in der Oberfläche gesetzt
+(`http://127.0.0.1:20128`). URL und API-Key werden **im Benutzerverzeichnis
+gespeichert** (Windows: `%APPDATA%\Schaltwerk\config.json`, Linux:
+`~/.config/schaltwerk/config.json`) — nach dem Start verbindet Schaltwerk
+automatisch; ein fehlgeschlagener Connect überschreibt den gespeicherten Key
+nicht. Zum Zurücksetzen die Datei löschen.
+
+**3-Provider-Regel:** Jeder Provider-Key wird (vom Nutzer) mehrfach — üblich:
+3× — als Connection angelegt. „Proxies zuordnen" gibt jeder aktiven Connection
+ihren eigenen Proxy (Connection-Ebene, `scope=account`), Connections desselben
+Providers bekommen round-robin die besten Proxies → jeder Key-Instanz eine
+eigene Exit-IP. Die Zuordnung läuft nach jedem Austausch automatisch.

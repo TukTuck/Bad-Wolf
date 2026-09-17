@@ -5,6 +5,7 @@ Läuft ohne Netz und ohne OmniRoute: pytest tests/
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -250,3 +251,168 @@ class TestTray:
     def test_proxy_logs_ohne_key(self, client):
         r = client.get("/api/omni/proxy-logs")
         assert r.status_code == 400
+
+
+# ── 3-Provider-Regel: jede Connection (Key-Instanz) eigener Proxy ────
+
+class FakeResp:
+    def __init__(self, status_code=200, data=None, text=""):
+        self.status_code = status_code
+        self._data = data if data is not None else {}
+        self.text = text or json.dumps(self._data)
+
+    def json(self):
+        return self._data
+
+
+def _conn(cid, provider, active=True):
+    return {"id": cid, "provider": provider, "isActive": active}
+
+
+def _px(i, ms):
+    return {
+        "id": f"px{i}", "name": f"px-de-1.2.3.{i}", "host": f"1.2.3.{i}", "port": 8080,
+        "type": "http", "status": "active",
+        "notes": f"proxy-exchange https_ok latency={ms}ms exit=1.2.3.{i}",
+    }
+
+
+class TestDreiProviderRegel:
+    def test_jede_connection_eigener_proxy_scope_account(self, client, monkeypatch):
+        """6 Connections (2 Provider × 3 Keys) und 3 Proxies → jede Connection
+        bekommt per scope=account ihren eigenen Proxy; die 3 Keys eines
+        Providers bekommen 3 VERSCHIEDENE Proxies (verschiedene Exit-IPs)."""
+        server.settings["api_key"] = "test-key"
+        connections = [
+            _conn("c-or-1", "openrouter"), _conn("c-or-2", "openrouter"), _conn("c-or-3", "openrouter"),
+            _conn("c-gq-1", "groq"), _conn("c-gq-2", "groq"), _conn("c-gq-3", "groq"),
+        ]
+        registry = [_px(1, 100), _px(2, 200), _px(3, 300)]
+        calls: list[tuple] = []
+
+        async def fake_providers():
+            return connections
+
+        async def fake_registry():
+            return registry
+
+        async def fake_request(method, path, **kw):
+            calls.append((method, path, kw.get("json")))
+            if method == "PUT" and "bulk-assign" in path:
+                return FakeResp(200, {"success": True, "updated": 1})
+            if method == "GET" and "assignments" in path:
+                return FakeResp(200, {"items": []})
+            return FakeResp(200, {})
+
+        monkeypatch.setattr(server, "list_providers", fake_providers)
+        monkeypatch.setattr(server, "list_management_proxies", fake_registry)
+        monkeypatch.setattr(server, "omni_request", fake_request)
+
+        r = client.post("/api/assign-providers", json={})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["counts"]["assigned"] == 6
+        assert body["counts"]["failed"] == 0
+        assert body["counts"]["proxies_used"] == 3
+
+        # Alle Zuordnungen auf Connection-Ebene (scope=account)
+        puts = [c for c in calls if c[0] == "PUT" and "bulk-assign" in c[1]]
+        assert len(puts) == 6
+        for _, _, payload in puts:
+            assert payload["scope"] == "account"
+            assert len(payload["scopeIds"]) == 1
+
+        # Die 3 openrouter-Keys bekommen 3 verschiedene Proxies
+        or_proxies = {p["proxy_id"] for cid, p in body["assigned"].items() if cid.startswith("c-or")}
+        assert or_proxies == {"px1", "px2", "px3"}
+
+    def test_inaktive_connections_werden_uebersprungen(self, client, monkeypatch):
+        server.settings["api_key"] = "test-key"
+        connections = [_conn("c-on", "openrouter", active=True), _conn("c-off", "openrouter", active=False)]
+        calls: list[tuple] = []
+
+        async def fake_providers():
+            return connections
+
+        async def fake_registry():
+            return [_px(1, 100)]
+
+        async def fake_request(method, path, **kw):
+            calls.append((method, path, kw.get("json")))
+            if method == "PUT":
+                return FakeResp(200, {"success": True})
+            if method == "GET":
+                return FakeResp(200, {"items": []})
+            return FakeResp(200, {})
+
+        monkeypatch.setattr(server, "list_providers", fake_providers)
+        monkeypatch.setattr(server, "list_management_proxies", fake_registry)
+        monkeypatch.setattr(server, "omni_request", fake_request)
+
+        r = client.post("/api/assign-providers", json={})
+        assert r.status_code == 200
+        assert r.json()["counts"]["connections"] == 1  # nur die aktive
+        put_targets = [c[2]["scopeIds"][0] for c in calls if c[0] == "PUT"]
+        assert put_targets == ["c-on"]
+
+    def test_mehr_connections_als_proxies_round_robin(self, client, monkeypatch):
+        """5 Keys, aber nur 2 Proxies → round-robin: Key 4 teilt mit Key 1."""
+        server.settings["api_key"] = "test-key"
+        connections = [_conn(f"c-{i}", "openrouter") for i in range(5)]
+
+        async def fake_providers():
+            return connections
+
+        async def fake_registry():
+            return [_px(1, 100), _px(2, 200)]
+
+        async def fake_request(method, path, **kw):
+            if method == "PUT":
+                return FakeResp(200, {"success": True})
+            return FakeResp(200, {"items": []} if method == "GET" else {})
+
+        monkeypatch.setattr(server, "list_providers", fake_providers)
+        monkeypatch.setattr(server, "list_management_proxies", fake_registry)
+        monkeypatch.setattr(server, "omni_request", fake_request)
+
+        r = client.post("/api/assign-providers", json={})
+        assigned = r.json()["assigned"]
+        assert [assigned[f"c-{i}"]["proxy_id"] for i in range(5)] == ["px1", "px2", "px1", "px2", "px1"]
+
+
+class TestConfigPersistenz:
+    """URL + Key liegen wie bei üblichen Apps im Benutzerverzeichnis."""
+
+    def test_roundtrip_speichern_und_laden(self, tmp_path, monkeypatch):
+        cfg = tmp_path / "config.json"
+        monkeypatch.setattr(server, "config_path", lambda: cfg)
+        server.settings["omni_url"] = "http://127.0.0.1:20128"
+        server.settings["api_key"] = "key-123"
+        server.save_config()
+        assert cfg.exists()
+        # Zustand "verloren" (Neustart simulieren) → laden stellt wieder her
+        server.settings["api_key"] = ""
+        server.settings["omni_url"] = "http://x"
+        server.load_config()
+        assert server.settings["api_key"] == "key-123"
+        assert server.settings["omni_url"] == "http://127.0.0.1:20128"
+
+    def test_connect_speichert_nur_bei_erfolg(self, client, monkeypatch, tmp_path):
+        cfg = tmp_path / "config.json"
+        monkeypatch.setattr(server, "config_path", lambda: cfg)
+
+        async def fake_ok(method, path, **kw):
+            return FakeResp(200, {"items": []})
+
+        monkeypatch.setattr(server, "omni_request", fake_ok)
+        client.post("/api/connect", json={"omni_url": "http://127.0.0.1:20128", "api_key": "guter-key"})
+        assert cfg.exists()
+        assert json.loads(cfg.read_text())["api_key"] == "guter-key"
+
+        # Fehlgeschlagener Connect (403) darf den gespeicherten Key NICHT überschreiben
+        async def fake_bad(method, path, **kw):
+            return FakeResp(403, text="Invalid management token")
+
+        monkeypatch.setattr(server, "omni_request", fake_bad)
+        client.post("/api/connect", json={"omni_url": "http://127.0.0.1:20128", "api_key": "schlechter-key"})
+        assert json.loads(cfg.read_text())["api_key"] == "guter-key"
