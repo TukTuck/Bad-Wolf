@@ -3,3 +3,9 @@
 # Einzige Ausnahme: node_modules/ (aktuell nicht vorhanden, nur Absicherung
 # falls später npm install im omniroute/-Ordner läuft).
 node_modules/
+
+# Python-Laufzeitcaches aus Test-Läufen (pytest/Interpreter) — nicht
+# versionieren. Die im Initial-Import committeten .pyc-Stände bleiben
+# davon unberührt (gitignore greift nur für neue Dateien).
+__pycache__/
+*.pyc

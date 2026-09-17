@@ -61,7 +61,26 @@ inklusive Regressionstest `test_connect_erkenn_403_als_auth_fehler`.
 
 ## Starten
 
-### Schaltwerk
+### Alles zusammen (empfohlen)
+
+**Windows:** `START-ALLES.bat` doppelklicken — startet beide Apps in eigenen
+Fenstern (OmniRoute auf 20128, Schaltwerk auf 8765). Beim ersten Lauf werden
+Abhängigkeiten automatisch installiert; fehlende optionale npm-Pakete werden
+durch `omniroute/scripts/setup/fix-optional-deps.mjs` repariert (bekanntes
+Problem: `npm ci` überspringt je nach Plattform optionalDependencies — ohne
+Reparatur bricht der Dev-Server mit `Module not found:
+'@huggingface/transformers'` ab).
+
+**Linux/Dev:** `./START-ALLES.sh`
+
+OmniRoute-Dashboard: `http://127.0.0.1:20128` (Login: `INITIAL_PASSWORD` aus
+`omniroute/.env` oder Default `CHANGEME` — ändern!). Schaltwerk:
+`http://127.0.0.1:8765`. Key mit **manage-Scope** im OmniRoute-Dashboard
+(API Keys) anlegen und einmal in Schaltwerk eintragen — URL + Key werden
+danach im Benutzerverzeichnis gespeichert (`%APPDATA%\Schaltwerk\config.json`)
+und Schaltwerk verbindet sich bei jedem Start automatisch.
+
+### einzeln
 
 ```bat
 cd schaltwerk
@@ -94,7 +113,15 @@ Weitere Skripte in `omniroute/package.json` (u. a. `build`,
 ## Verbindung der beiden Teile
 
 Schaltwerk schreibt geprüfte Proxies über die Management-API nach OmniRoute.
-Der Endpunkt ist **nicht** im Code hinterlegt, sondern wird zur Laufzeit in der
-Oberfläche gesetzt (`http://127.0.0.1:24615`). Der API-Key wird ebenfalls nur
-zur Laufzeit gehalten und **nicht persistiert** — nach jedem Neustart von
-Schaltwerk neu eintragen.
+Der Endpunkt wird zur Laufzeit in der Oberfläche gesetzt
+(`http://127.0.0.1:20128`). URL und API-Key werden **im Benutzerverzeichnis
+gespeichert** (Windows: `%APPDATA%\Schaltwerk\config.json`, Linux:
+`~/.config/schaltwerk/config.json`) — nach dem Start verbindet Schaltwerk
+automatisch; ein fehlgeschlagener Connect überschreibt den gespeicherten Key
+nicht. Zum Zurücksetzen die Datei löschen.
+
+**3-Provider-Regel:** Jeder Provider-Key wird (vom Nutzer) mehrfach — üblich:
+3× — als Connection angelegt. „Proxies zuordnen" gibt jeder aktiven Connection
+ihren eigenen Proxy (Connection-Ebene, `scope=account`), Connections desselben
+Providers bekommen round-robin die besten Proxies → jeder Key-Instanz eine
+eigene Exit-IP. Die Zuordnung läuft nach jedem Austausch automatisch.
