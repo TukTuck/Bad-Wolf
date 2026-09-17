@@ -3,6 +3,10 @@
 Konsolidiertes Arbeitsrepo für **OmniRoute** und **Schaltwerk** — beide bisher an
 getrennten Orten und in unterschiedlichen Versionsständen.
 
+Der zentrale [Bad-Wolf-Fahrplan](FAHRPLAN.md) dokumentiert Zielbild, Entscheidungen,
+geprüften Stand und kleine nächste Arbeitspakete. Das daraus erzeugte
+[Übersichtsblatt](output/pdf/Bad-Wolf-Fahrplan.pdf) fasst den aktuellen Plan auf einer Seite zusammen.
+
 ## Inhalt
 
 | Pfad | Was | Technik |
