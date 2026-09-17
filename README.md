@@ -57,7 +57,26 @@ inklusive Regressionstest `test_connect_erkenn_403_als_auth_fehler`.
 
 ## Starten
 
-### Schaltwerk
+### Alles zusammen (empfohlen)
+
+**Windows:** `START-ALLES.bat` doppelklicken — startet beide Apps in eigenen
+Fenstern (OmniRoute auf 20128, Schaltwerk auf 8765). Beim ersten Lauf werden
+Abhängigkeiten automatisch installiert; fehlende optionale npm-Pakete werden
+durch `omniroute/scripts/setup/fix-optional-deps.mjs` repariert (bekanntes
+Problem: `npm ci` überspringt je nach Plattform optionalDependencies — ohne
+Reparatur bricht der Dev-Server mit `Module not found:
+'@huggingface/transformers'` ab).
+
+**Linux/Dev:** `./START-ALLES.sh`
+
+OmniRoute-Dashboard: `http://127.0.0.1:20128` (Login: `INITIAL_PASSWORD` aus
+`omniroute/.env` oder Default `CHANGEME` — ändern!). Schaltwerk:
+`http://127.0.0.1:8765`. Key mit **manage-Scope** im OmniRoute-Dashboard
+(API Keys) anlegen und einmal in Schaltwerk eintragen — URL + Key werden
+danach im Benutzerverzeichnis gespeichert (`%APPDATA%\Schaltwerk\config.json`)
+und Schaltwerk verbindet sich bei jedem Start automatisch.
+
+### einzeln
 
 ```bat
 cd schaltwerk
