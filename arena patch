@@ -1,0 +1,993 @@
+diff --git a/.gitignore b/.gitignore
+index e7d3a74..2ab6d20 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -3,3 +3,9 @@
+ # Einzige Ausnahme: node_modules/ (aktuell nicht vorhanden, nur Absicherung
+ # falls später npm install im omniroute/-Ordner läuft).
+ node_modules/
++
++# Python-Laufzeitcaches aus Test-Läufen (pytest/Interpreter) — nicht
++# versionieren. Die im Initial-Import committeten .pyc-Stände bleiben
++# davon unberührt (gitignore greift nur für neue Dateien).
++__pycache__/
++*.pyc
+diff --git a/README.md b/README.md
+index 0a59ccd..c5d9208 100644
+--- a/README.md
++++ b/README.md
+@@ -57,7 +57,26 @@ inklusive Regressionstest `test_connect_erkenn_403_als_auth_fehler`.
+ 
+ ## Starten
+ 
+-### Schaltwerk
++### Alles zusammen (empfohlen)
++
++**Windows:** `START-ALLES.bat` doppelklicken — startet beide Apps in eigenen
++Fenstern (OmniRoute auf 20128, Schaltwerk auf 8765). Beim ersten Lauf werden
++Abhängigkeiten automatisch installiert; fehlende optionale npm-Pakete werden
++durch `omniroute/scripts/setup/fix-optional-deps.mjs` repariert (bekanntes
++Problem: `npm ci` überspringt je nach Plattform optionalDependencies — ohne
++Reparatur bricht der Dev-Server mit `Module not found:
++'@huggingface/transformers'` ab).
++
++**Linux/Dev:** `./START-ALLES.sh`
++
++OmniRoute-Dashboard: `http://127.0.0.1:20128` (Login: `INITIAL_PASSWORD` aus
++`omniroute/.env` oder Default `CHANGEME` — ändern!). Schaltwerk:
++`http://127.0.0.1:8765`. Key mit **manage-Scope** im OmniRoute-Dashboard
++(API Keys) anlegen und einmal in Schaltwerk eintragen — URL + Key werden
++danach im Benutzerverzeichnis gespeichert (`%APPDATA%\Schaltwerk\config.json`)
++und Schaltwerk verbindet sich bei jedem Start automatisch.
++
++### einzeln
+ 
+ ```bat
+ cd schaltwerk
+@@ -90,7 +109,15 @@ Weitere Skripte in `omniroute/package.json` (u. a. `build`,
+ ## Verbindung der beiden Teile
+ 
+ Schaltwerk schreibt geprüfte Proxies über die Management-API nach OmniRoute.
+-Der Endpunkt ist **nicht** im Code hinterlegt, sondern wird zur Laufzeit in der
+-Oberfläche gesetzt (`http://127.0.0.1:24615`). Der API-Key wird ebenfalls nur
+-zur Laufzeit gehalten und **nicht persistiert** — nach jedem Neustart von
+-Schaltwerk neu eintragen.
++Der Endpunkt wird zur Laufzeit in der Oberfläche gesetzt
++(`http://127.0.0.1:20128`). URL und API-Key werden **im Benutzerverzeichnis
++gespeichert** (Windows: `%APPDATA%\Schaltwerk\config.json`, Linux:
++`~/.config/schaltwerk/config.json`) — nach dem Start verbindet Schaltwerk
++automatisch; ein fehlgeschlagener Connect überschreibt den gespeicherten Key
++nicht. Zum Zurücksetzen die Datei löschen.
++
++**3-Provider-Regel:** Jeder Provider-Key wird (vom Nutzer) mehrfach — üblich:
++3× — als Connection angelegt. „Proxies zuordnen" gibt jeder aktiven Connection
++ihren eigenen Proxy (Connection-Ebene, `scope=account`), Connections desselben
++Providers bekommen round-robin die besten Proxies → jeder Key-Instanz eine
++eigene Exit-IP. Die Zuordnung läuft nach jedem Austausch automatisch.
+diff --git a/START-ALLES.bat b/START-ALLES.bat
+new file mode 100644
+index 0000000..981eb0f
+--- /dev/null
++++ b/START-ALLES.bat
+@@ -0,0 +1,50 @@
++@echo off
++setlocal EnableExtensions
++chcp 65001 >nul
++title Bad Wolf — Gesamtstart (OmniRoute + Schaltwerk)
++cd /d "%~dp0"
++
++echo ==========================================================
++echo   Bad Wolf — Gesamtstart
++echo   1. OmniRoute  (Node.js)   -> http://127.0.0.1:20128
++echo   2. Schaltwerk (Python)    -> http://127.0.0.1:8765
++echo ==========================================================
++echo.
++
++where node >nul 2>&1
++if errorlevel 1 (
++  echo  [!] Node.js fehlt. Benoetigt: Version 22.22.2 oder neuer.
++  echo      https://nodejs.org/  ^(LTS installieren, "Add to PATH" anhaeken^)
++  pause
++  exit /b 1
++)
++
++echo [1/2] OmniRoute vorbereiten ...
++cd /d "%~dp0omniroute"
++if not exist node_modules (
++  echo   node_modules fehlt - installiere Pakete ^(einmalig, dauert Minuten^) ...
++  call npm ci --no-audit --no-fund
++  if errorlevel 1 (
++    echo   [!] npm ci fehlgeschlagen. Internet an?
++    pause
++    exit /b 1
++  )
++)
++echo   Optionale Pakete pruefen/beheben ...
++call node scripts\setup\fix-optional-deps.mjs
++start "OmniRoute (20128)" cmd /c "cd /d %~dp0omniroute && npm run dev"
++
++cd /d "%~dp0"
++echo [2/2] Schaltwerk starten ...
++start "Schaltwerk (8765)" cmd /c "cd /d %~dp0schaltwerk && call STARTEN.bat"
++
++echo.
++echo   Beide Fenster offen lassen. Erster Start von OmniRoute braucht
++echo   1-2 Minuten Kompilierzeit - danach Dashboard-Login:
++echo     http://127.0.0.1:20128   (Passwort: INITIAL_PASSWORD oder CHANGEME)
++echo   Schaltwerk:  http://127.0.0.1:8765
++echo   Key mit manage-Scope im OmniRoute-Dashboard anlegen und einmal
++echo   in Schaltwerk eintragen - danach verbindet Schaltwerk automatisch.
++echo.
++echo   Beenden: beide Konsolenfenster schliessen ^(Strg+C^).
++pause
+diff --git a/START-ALLES.sh b/START-ALLES.sh
+new file mode 100755
+index 0000000..492a3e6
+--- /dev/null
++++ b/START-ALLES.sh
+@@ -0,0 +1,48 @@
++#!/usr/bin/env bash
++# Bad Wolf — Gesamtstart (OmniRoute + Schaltwerk), Linux-/Dev-Variante.
++# Windows: START-ALLES.bat nehmen.
++set -euo pipefail
++cd "$(dirname "$0")"
++
++echo "=========================================================="
++echo "  Bad Wolf — Gesamtstart"
++echo "  1. OmniRoute  (Node.js)   -> http://127.0.0.1:20128"
++echo "  2. Schaltwerk (Python)    -> http://127.0.0.1:8765"
++echo "=========================================================="
++
++command -v node >/dev/null || { echo "[!] Node.js fehlt (>=22.22.2): https://nodejs.org/"; exit 1; }
++
++# ── OmniRoute ────────────────────────────────────────────────────────
++if [ ! -d omniroute/node_modules ]; then
++  echo "[1/2] OmniRoute: node_modules fehlt — npm ci (einmalig, dauert Minuten) …"
++  (cd omniroute && npm ci --no-audit --no-fund)
++fi
++echo "[1/2] OmniRoute: optionale Pakete prüfen/beheben …"
++(cd omniroute && node scripts/setup/fix-optional-deps.mjs)
++echo "[1/2] OmniRoute starten …"
++(cd omniroute && npm run dev) &
++OMNI_PID=$!
++
++# ── Schaltwerk ───────────────────────────────────────────────────────
++PY=""
++for c in python3 python; do
++  command -v "$c" >/dev/null && { PY="$c"; break; }
++done
++[ -n "$PY" ] || { echo "[!] Python 3.11+ fehlt."; kill $OMNI_PID 2>/dev/null || true; exit 1; }
++
++SWENV="schaltwerk/.venv"
++if [ ! -d "$SWENV" ]; then
++  echo "[2/2] Schaltwerk: Virtualenv anlegen (einmalig) …"
++  "$PY" -m venv "$SWENV"
++  "$SWENV/bin/pip" install -q -r schaltwerk/requirements.txt
++fi
++echo "[2/2] Schaltwerk starten …"
++(cd schaltwerk && HOST=127.0.0.1 PORT=8765 "../$SWENV/bin/python" server.py) &
++SW_PID=$!
++
++trap 'kill $OMNI_PID $SW_PID 2>/dev/null || true' EXIT INT TERM
++echo
++echo "  Beide laufen. OmniRoute-Dashboard: http://127.0.0.1:20128"
++echo "  Schaltwerk:                http://127.0.0.1:8765"
++echo "  Beenden: Strg+C"
++wait
+diff --git a/omniroute/scripts/setup/fix-optional-deps.mjs b/omniroute/scripts/setup/fix-optional-deps.mjs
+new file mode 100644
+index 0000000..e0a5023
+--- /dev/null
++++ b/omniroute/scripts/setup/fix-optional-deps.mjs
+@@ -0,0 +1,139 @@
++#!/usr/bin/env node
++/**
++ * fix-optional-deps.mjs — repariert fehlende optionalDependencies.
++ *
++ * Warum: `npm ci` lässt optionalDependencies je nach Plattform/Registry still
++ * aus (Native-Prebuilds, overrides-Konflikte). Ohne z. B.
++ * `@huggingface/transformers` bricht der Dev-Server schon beim Kompilieren
++ * der Instrumentation ab:
++ *   Module not found: Can't resolve '@huggingface/transformers'
++ *
++ * Ablauf (idempotent — nur fehlende Pakete werden angefasst):
++ *   1. Fehlende optionale Pakete normal via `npm install --no-save` nachziehen.
++ *   2. Was npm weiterhin verweigert (z. B. overrides-Kandidaten wie
++ *      onnxruntime-node), wird über `npm pack` + tar-Entpacken direkt nach
++ *      node_modules/ gelegt (tar ist auf Windows 10+, Linux und macOS dabei).
++ *   3. Fehlende transitive Abhängigkeiten paketierter Module noch einmal
++ *      normal nachziehen.
++ *
++ * keytar ist bewusst NICHT fatal: ohne native Build-Tools bleibt es weg,
++ * der Code hat dafür Laufzeit-Fallbacks (Keychain optional).
++ *
++ * Aufruf:  node scripts/setup/fix-optional-deps.mjs
++ */
++import { spawnSync } from "node:child_process";
++import fs from "node:fs";
++import path from "node:path";
++import os from "node:os";
++import { fileURLToPath } from "node:url";
++
++const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
++const NM = path.join(ROOT, "node_modules");
++const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8"));
++const optional = Object.entries(pkg.optionalDependencies || {});
++
++const isWin = process.platform === "win32";
++const run = (cmd, args, cwd) =>
++  spawnSync(cmd, args, { cwd, stdio: "pipe", encoding: "utf8", shell: isWin });
++
++const nmPath = (name) => path.join(NM, ...name.split("/"));
++const present = (name) => {
++  try {
++    return fs.existsSync(path.join(nmPath(name), "package.json"));
++  } catch {
++    return false;
++  }
++};
++
++let missing = optional.filter(([name]) => !present(name));
++if (!missing.length) {
++  console.log("[fix-optional-deps] alle optionalen Pakete vorhanden — nichts zu tun.");
++  process.exit(0);
++}
++console.log(
++  `[fix-optional-deps] ${missing.length} fehlend: ` +
++    missing.map(([n, v]) => `${n}@${v}`).join(", ")
++);
++
++if (!fs.existsSync(NM)) {
++  console.error("[fix-optional-deps] node_modules fehlt — zuerst `npm ci` ausführen.");
++  process.exit(1);
++}
++
++// ── Schritt 1: normaler Nachzug über npm ────────────────────────────
++const step1 = missing;
++const r1 = run("npm", [
++  "install", "--no-save", "--no-audit", "--no-fund",
++  ...step1.map(([n, v]) => `${n}@${v}`),
++], ROOT);
++if (r1.status !== 0) {
++  console.warn("[fix-optional-deps] npm install teilweise fehlgeschlagen — pack-Fallback folgt.");
++}
++
++const stillMissing = () => optional.filter(([name]) => !present(name));
++
++// ── Schritt 2: npm pack + tar für alles, was weiterhin fehlt ────────
++const packInstall = (name, version) => {
++  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "omniroute-optdep-"));
++  try {
++    const r = run("npm", ["pack", `${name}@${version}`, "--silent"], tmp);
++    if (r.status !== 0) return false;
++    const tgz = fs.readdirSync(tmp).find((f) => f.endsWith(".tgz"));
++    if (!tgz) return false;
++    const dest = nmPath(name);
++    const parent = path.dirname(dest);
++    fs.mkdirSync(parent, { recursive: true });
++    const staging = path.join(tmp, "x");
++    fs.mkdirSync(staging, { recursive: true });
++    const ex = run("tar", ["-xzf", path.join(tmp, tgz), "-C", staging], tmp);
++    if (ex.status !== 0) return false;
++    fs.rmSync(dest, { recursive: true, force: true });
++    fs.renameSync(path.join(staging, "package"), dest);
++    return present(name);
++  } finally {
++    fs.rmSync(tmp, { recursive: true, force: true });
++  }
++};
++
++for (const [name, version] of stillMissing()) {
++  if (name === "keytar") {
++    console.warn(`[fix-optional-deps] keytar übersprungen (optional, braucht native Build-Tools — Fallback aktiv).`);
++    continue;
++  }
++  console.log(`[fix-optional-deps] ${name}: npm pack + entpacken …`);
++  if (!packInstall(name, version)) {
++    console.warn(`[fix-optional-deps] ${name}: konnte nicht installiert werden.`);
++  }
++}
++
++// ── Schritt 3: transitive Abhängigkeiten der paketierten Module ─────
++const transitives = new Set();
++for (const [name] of optional) {
++  const pj = path.join(nmPath(name), "package.json");
++  if (!fs.existsSync(pj)) continue;
++  try {
++    const meta = JSON.parse(fs.readFileSync(pj, "utf8"));
++    for (const dep of Object.keys(meta.dependencies || {})) {
++      if (!present(dep)) transitives.add(dep);
++    }
++  } catch {
++    /* defekte package.json ignorieren */
++  }
++}
++if (transitives.size) {
++  console.log(`[fix-optional-deps] transitive nachziehen: ${[...transitives].join(", ")}`);
++  run("npm", ["install", "--no-save", "--no-audit", "--no-fund", ...transitives], ROOT);
++}
++
++// ── Abschlussbericht ─────────────────────────────────────────────────
++const finalMissing = stillMissing().map(([n]) => n).filter((n) => n !== "keytar");
++const fixed = optional.map(([n]) => n).filter((n) => present(n));
++console.log(
++  `[fix-optional-deps] vorhanden: ${fixed.length}/${optional.length}` +
++    (fixed.length ? ` (${fixed.join(", ")})` : "")
++);
++if (finalMissing.length) {
++  console.error(`[fix-optional-deps] FEHLT weiterhin: ${finalMissing.join(", ")}`);
++  process.exit(1);
++}
++console.log("[fix-optional-deps] fertig.");
+diff --git a/schaltwerk/CHANGELOG.md b/schaltwerk/CHANGELOG.md
+index 3008d7e..88a046d 100644
+--- a/schaltwerk/CHANGELOG.md
++++ b/schaltwerk/CHANGELOG.md
+@@ -17,6 +17,26 @@ nächsten Stand nach unten in eine Versionsnummer verschoben.
+ 
+ ### Hinzugefügt
+ 
++- **3-Provider-Regel — Zuordnung auf Connection-Ebene:** „Proxies zuordnen"
++  ordnet jetzt JEDER aktiven Connection (Key-Instanz) ihren EIGENEN Proxy zu
++  (`scope=account`, `scopeId=connectionId`) statt einen Proxy pro Provider
++  (`scope=provider`). Connections desselben Providers (der Nutzer legt jeden
++  Key üblicherweise 3× an) bekommen round-robin die besten px-*-Proxies —
++  3 Keys = 3 verschiedene Exit-IPs. Inaktive Connections werden übersprungen.
++- **Auto-Zuordnung:** Nach jedem Austausch (manuell UND geplant über den
++  Scheduler), nach „Ausgewählte übernehmen" und nach der Ablage-Prüfung werden
++  die Verbindungen automatisch neu zugeordnet — kein Button-Klick mehr nötig.
++  Im Parameter-Menü abschaltbar („Auto-Zuordnung").
++- **Persistente Verbindungseinstellungen:** OmniRoute-URL und Management-API-Key
++  werden wie bei üblichen Anwendungen im Benutzerverzeichnis gespeichert
++  (Windows: `%APPDATA%\Schaltwerk\config.json`, Linux:
++  `~/.config/schaltwerk/config.json`) — nicht im Repo, nicht im Programmordner.
++  Gespeichert wird nur bei erfolgreichem Connect; nach dem Start verbindet
++  Schaltwerk automatisch. Der Key wird nie an den Browser geschickt (nur
++  `has_key`-Flag). Entfernen: Datei löschen.
++
++### Geändert
++
+ - **Bad Wolf wird wach:** Wachdienst beim Serverstart (Bereitschaftsmeldung
+   mit Pool-/Register-Stand, bzw. „aber blind" ohne Key), Begrüßung nach dem
+   ersten erfolgreichen Connect, und ein Beobachter, der alle 60 s den
+diff --git a/schaltwerk/WEITERARBEITEN.txt b/schaltwerk/WEITERARBEITEN.txt
+index a062af3..668f6d9 100644
+--- a/schaltwerk/WEITERARBEITEN.txt
++++ b/schaltwerk/WEITERARBEITEN.txt
+@@ -4,6 +4,15 @@ Stand: 2026-08-12
+ Plattform-Ziel: Windows 10 (läuft auch unter Linux)
+ Sprache der Oberfläche: Deutsch
+ 
++> **UPDATE (Stand Bad-Wolf-Repo, 2026-09):** Der Abschnitt API-KEY-HANDLING
++> weiter unten ist HISTORISCH. Die RAM-only-Entscheidung wurde vom PO geändert:
++> URL + Key liegen jetzt im **Benutzerverzeichnis** (Windows:
++> `%APPDATA%\Schaltwerk\config.json`), gespeichert nur bei erfolgreichem
++> Connect, Auto-Connect beim Start. Neu ist außerdem die **3-Provider-Regel**
++> (Zuordnung auf Connection-Ebene, `scope=account`) und die **Auto-Zuordnung**
++> nach jedem Austausch — Details: CHANGELOG.md [Unreleased].
++
++
+ 
+ ══════════════════════════════════════════════════════════════════
+ WAS DAS IST
+diff --git a/schaltwerk/server.py b/schaltwerk/server.py
+index 9abb2a3..cda7e4a 100644
+--- a/schaltwerk/server.py
++++ b/schaltwerk/server.py
+@@ -236,6 +236,45 @@ settings: dict[str, Any] = {
+     "api_key": "",
+ }
+ 
++
++# ── Persistente Verbindungseinstellungen ────────────────────────────
++# URL + API-Key liegen wie bei üblichen Anwendungen im Benutzerverzeichnis
++# (Windows: %APPDATA%\Schaltwerk\config.json, sonst ~/.config/schaltwerk/),
++# NICHT neben dem Code — nichts landet so in Repo, Backups des Programmordners
++# oder geteilten Ordnern. Bei Fehlen der Datei: RAM-only wie bisher.
++def config_path() -> Path:
++    if sys.platform == "win32":
++        base = Path(os.environ.get("APPDATA") or (Path.home() / "AppData" / "Roaming"))
++        return base / "Schaltwerk" / "config.json"
++    base = Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config"))
++    return base / "schaltwerk" / "config.json"
++
++
++def load_config() -> None:
++    try:
++        data = json.loads(config_path().read_text(encoding="utf-8"))
++    except Exception:
++        return  # keine/defekte Config → Defaults, RAM-only
++    if isinstance(data, dict):
++        if data.get("omni_url"):
++            settings["omni_url"] = str(data["omni_url"])
++        settings["api_key"] = str(data.get("api_key") or "")
++
++
++def save_config() -> None:
++    try:
++        p = config_path()
++        p.parent.mkdir(parents=True, exist_ok=True)
++        p.write_text(
++            json.dumps({"omni_url": settings["omni_url"], "api_key": settings["api_key"]}, indent=2),
++            encoding="utf-8",
++        )
++    except Exception as exc:  # niemals den Betrieb wegen einer Config blockieren
++        print(f"[config] Speichern fehlgeschlagen: {exc}", flush=True)
++
++
++load_config()
++
+ # Letzter/laufender Austausch-Job — für GET /api/job-status und Server-Logging.
+ job_state: dict[str, Any] = {
+     "running": False,
+@@ -640,9 +679,7 @@ def proxy_latency_ms(p: dict[str, Any]) -> int:
+     return int(m.group(1)) if m else 9_999
+ 
+ 
+-async def assign_proxy_to_providers(
+-    proxy_id: str, scope: str, scope_ids: list[str]
+-) -> httpx.Response:
++async def assign_proxy_bulk(proxy_id: str, scope: str, scope_ids: list[str]) -> httpx.Response:
+     """PUT bulk-assign; falls die Version POST erwartet (Doku), Retry mit POST."""
+     payload = {"scope": scope, "scopeIds": scope_ids, "proxyId": proxy_id}
+     resp = await omni_request("PUT", "/api/v1/management/proxies/bulk-assign", json=payload)
+@@ -651,6 +688,15 @@ async def assign_proxy_to_providers(
+     return resp
+ 
+ 
++async def assign_proxy_to_connection(proxy_id: str, connection_id: str) -> httpx.Response:
++    """3-Provider-Regel: JEDER Key-Instanz (Connection) ihren EIGENEN Proxy
++    zuordnen — auf Connection-Ebene (scope=account, scopeId=connectionId),
++    nicht auf Provider-Ebene. OmniRoutes Resolver greift pro Connection auf
++    den account-Pool zu (account → provider → global), sodass 3 angelegte
++    Keys desselben Providers 3 verschiedene Exit-IPs bekommen."""
++    return await assign_proxy_bulk(proxy_id, "account", [connection_id])
++
++
+ class ConnectBody(BaseModel):
+     omni_url: str = Field(default="http://127.0.0.1:20128")
+     api_key: str = ""
+@@ -683,6 +729,7 @@ class ExchangeBody(BaseModel):
+     remove_dead_harvest: bool = True
+     push_live: bool = True
+     check_oneproxy: bool = True
++    auto_assign: bool = True
+     sources: list[str] | None = None
+     types: list[str] | None = None
+ 
+@@ -744,8 +791,12 @@ async def connect(body: ConnectBody) -> dict[str, Any]:
+         except Exception:
+             pass
+ 
+-    if reachable and auth_ok and not had_key:
+-        bw_say("Verbunden. Ich sehe alles.")
++    if reachable and auth_ok:
++        # Erfolgreiche Verbindung dauerhaft im Benutzerverzeichnis ablegen —
++        # nach dem nächsten Start ist Schaltwerk automatisch verbunden.
++        save_config()
++        if not had_key:
++            bw_say("Verbunden. Ich sehe alles.")
+     return {
+         "ok": bool(reachable and auth_ok),
+         "reachable": reachable,
+@@ -852,119 +903,120 @@ async def check(body: CheckBody) -> dict[str, Any]:
+ 
+ @app.post("/api/assign-providers")
+ async def assign_providers(body: AssignBody) -> dict[str, Any]:
+-    """Ordnet die besten eigenen px-*-Proxies allen installierten Providern zu
+-    (scope=provider). Prüft zur Laufzeit, ob die OmniRoute-Version mehrere
+-    Proxies pro Scope (Pool) via API zulässt; sonst gilt 1 Proxy pro Provider.
+-    """
++    """3-Provider-Regel: Jede AKTIVE Connection (= eine Key-Instanz; der Nutzer
++    legt jeden Provider-Key üblicherweise 3× an) bekommt ihren EIGENEN Proxy —
++    zugeordnet auf Connection-Ebene (scope=account), nicht auf Provider-Ebene.
++    Connections desselben Providers bilden eine Gruppe und bekommen
++    round-robin die besten px-*-Proxies, damit die 3 Keys einer Gruppe
++    3 verschiedene Exit-IPs haben (Egress-Diversität statt geteilter IP)."""
+     if not (settings.get("api_key") or "").strip():
+         raise HTTPException(400, "Zuerst mit OmniRoute verbinden (API-Key mit manage-Scope eintragen).")
+     count = max(1, min(body.count, 8))
+ 
+     connections = await list_providers()
++    # Nur aktive Connections versorgen — inaktive Keys sollen nicht routen.
++    active = [
++        c for c in connections
++        if c.get("id") and c.get("isActive") is not False
++    ]
+     if body.providers:
+-        provider_ids = [p.strip().lower() for p in body.providers if p.strip()]
+-    else:
+-        seen: set[str] = set()
+-        provider_ids = []
+-        for c in connections:
+-            pid = str(c.get("provider") or "").strip().lower()
+-            if pid and pid not in seen:
+-                seen.add(pid)
+-                provider_ids.append(pid)
+-    if not provider_ids:
+-        raise HTTPException(400, "Keine installierten Provider gefunden (GET /api/providers leer).")
++        wanted = {p.strip().lower() for p in body.providers if p.strip()}
++        active = [c for c in active if str(c.get("provider") or "").strip().lower() in wanted]
++    if not active:
++        raise HTTPException(400, "Keine aktiven Provider-Connections gefunden (GET /api/providers leer oder alles inaktiv).")
+ 
+     registry = await list_management_proxies()
+-    harvest = [
++    pool = [
+         p
+         for p in registry
+         if is_harvest(p)
+-        and str(p.get("status") or "active") != "inactive"
++        and str(p.get("status") or "active").lower() not in ("inactive", "dead", "down", "error", "disabled")
+         and p.get("id")
+         and p.get("host")
+         and p.get("port")
+     ]
+-    harvest.sort(key=proxy_latency_ms)
+-    best = harvest[:count]
++    pool.sort(key=proxy_latency_ms)
++    best = pool[:count]
+     if not best:
+         raise HTTPException(400, "Keine eigenen Austausch-Proxies (px-*) im Register gefunden.")
+ 
+     def short(p: dict[str, Any]) -> str:
+         return f"{p['host']}:{p['port']}"
+ 
++    # Gruppen: Connections desselben Providers = die Key-Instanzen eines
++    # Providers (i. d. R. 3). Innerhalb der Gruppe round-robin über `best`.
++    groups: dict[str, list[dict[str, Any]]] = {}
++    for c in active:
++        groups.setdefault(str(c.get("provider") or "?"), []).append(c)
++
+     results: dict[str, Any] = {
+-        "providers": provider_ids,
+-        "best": [short(p) for p in best],
++        "providers": sorted(groups),
++        "proxies": [short(p) for p in best],
+         "assigned": {},
+-        "pool_mode": None,
+-        "pool_mode_reason": None,
++        "failed": {},
++        "groups": {},
+     }
+ 
+-    # 1) Besten Proxy jedem Provider zuordnen (dokumentierte Semantik).
+-    for pid in provider_ids:
+-        resp = await assign_proxy_to_providers(best[0]["id"], "provider", [pid])
+-        results["assigned"][pid] = {
+-            "proxy": short(best[0]),
+-            "ok": resp.status_code < 400,
+-            "status": resp.status_code,
+-            "detail": resp.text[:200] if resp.status_code >= 400 else "",
+-        }
+-
+-    # 2) Mehrfach-Zuordnung (Pool) ausprobieren: klappt es, bekommt jeder
+-    #    Provider bis zu `count` Proxies; sonst besten Proxy wiederherstellen.
+-    if len(best) > 1:
+-        probe_pid = provider_ids[0]
+-        probe = await assign_proxy_to_providers(best[1]["id"], "provider", [probe_pid])
+-        assign_resp = await omni_request(
+-            "GET",
+-            f"/api/v1/management/proxies/assignments?scope=provider&scope_id={probe_pid}&limit=50",
+-        )
+-        try:
+-            items = assign_resp.json().get("items") or []
+-        except Exception:
+-            items = []
+-        best_ids = {p["id"] for p in best}
+-        mine = [it for it in items if it.get("proxyId") in best_ids]
+-        if probe.status_code < 400 and len(mine) >= 2:
+-            results["pool_mode"] = True
+-            for pid in provider_ids:
+-                pool = []
+-                for proxy in best[1:]:
+-                    r = await assign_proxy_to_providers(proxy["id"], "provider", [pid])
+-                    pool.append({"proxy": short(proxy), "ok": r.status_code < 400, "status": r.status_code})
+-                results["assigned"][pid]["pool"] = pool
+-        else:
+-            results["pool_mode"] = False
+-            await assign_proxy_to_providers(best[0]["id"], "provider", [probe_pid])
+-            results["assigned"][probe_pid]["proxy"] = short(best[0])
+-            results["pool_mode_reason"] = (
+-                "Diese OmniRoute-Version ordnet via API nur 1 Proxy pro Scope zu (Replace-Semantik). "
+-                "Für einen Mehrfach-Pool im OmniRoute-Dashboard zuordnen."
+-            )
++    for provider, conns in sorted(groups.items()):
++        g: dict[str, Any] = {"connections": len(conns), "proxies": [], "ok": 0, "failed": 0}
++        for i, c in enumerate(conns):
++            proxy = best[i % len(best)]
++            resp = await assign_proxy_to_connection(str(proxy["id"]), str(c["id"]))
++            ok = resp.status_code < 400
++            if ok:
++                g["ok"] += 1
++                g["proxies"].append(short(proxy))
++                results["assigned"][str(c["id"])] = {
++                    "provider": provider,
++                    "connection": str(c["id"]),
++                    "proxy": short(proxy),
++                    "proxy_id": proxy.get("id"),
++                }
++            else:
++                g["failed"] += 1
++                g["proxies"].append(f"FEHLER HTTP {resp.status_code}")
++                results["failed"][str(c["id"])] = {
++                    "provider": provider,
++                    "connection": str(c["id"]),
++                    "proxy": short(proxy),
++                    "status": resp.status_code,
++                    "detail": resp.text[:200],
++                }
++        results["groups"][provider] = g
+ 
+-    # 3) Nachprüfen: was steht jetzt tatsächlich in OmniRoute (scope=provider)?
++    # Nachprüfen (Stichprobe): steht die Zuordnung wirklich in OmniRoute?
+     verified: dict[str, Any] = {}
+-    by_id = {p["id"]: short(p) for p in harvest}
+-    for pid in provider_ids:
++    by_id = {str(p["id"]): short(p) for p in pool}
++    for c in active[:5]:
+         ar = await omni_request(
+             "GET",
+-            f"/api/v1/management/proxies/assignments?scope=provider&scope_id={pid}&limit=50",
++            f"/api/v1/management/proxies/assignments?scope=account&scope_id={c['id']}&limit=10",
+         )
+         try:
+             items = ar.json().get("items") or []
+         except Exception:
+             items = []
+-        verified[pid] = [
+-            {"proxy_id": it.get("proxyId"), "proxy": by_id.get(it.get("proxyId"), "?")}
++        verified[str(c["id"])[:8]] = [
++            by_id.get(str(it.get("proxyId")), str(it.get("proxyId")))
+             for it in items
+-            if it.get("scopeId") == pid
++            if it.get("scopeId") == c["id"]
+         ]
+     results["verified"] = verified
+ 
+     results["counts"] = {
+-        "providers": len(provider_ids),
+-        "proxies_used": len(best) if results["pool_mode"] else 1,
++        "connections": len(active),
++        "assigned": len(results["assigned"]),
++        "failed": len(results["failed"]),
++        "proxies_used": len(best),
++        "providers": len(groups),
+     }
++    if results["counts"]["failed"]:
++        bw_say(
++            f"{results['counts']['assigned']} Verbindungen haben einen eigenen Proxy — "
++            f"{results['counts']['failed']} sind gescheitert."
++        )
++    else:
++        bw_say(f"Ich habe {results['counts']['assigned']} Verbindungen jeweils einen eigenen Proxy gegeben.")
+     return results
+ 
+ 
+@@ -1179,6 +1231,30 @@ async def _exchange_events(body: ExchangeBody):
+                         summary["failed_push"].append(fail)
+                         yield ev("push_fail", fail)
+ 
++            # 3-Provider-Regel: nach jedem Austausch automatisch JEDER aktiven
++            # Connection ihren eigenen Proxy geben — ohne Button-Klick. Läuft
++            # damit auch im geplanten Austausch (Scheduler) selbständig.
++            if body.auto_assign:
++                yield ev("phase", {"step": "assign", "label": "Proxies automatisch zuordnen (3-Provider-Regel)"})
++                try:
++                    assign_result = await assign_providers(AssignBody())
++                    counts = assign_result.get("counts", {})
++                    summary["auto_assigned"] = counts.get("assigned", 0)
++                    txt = (
++                        f"Auto-Zuordnung: {counts.get('assigned', 0)} von {counts.get('connections', 0)} "
++                        f"Connections haben jetzt je einen eigenen Proxy "
++                        f"({counts.get('proxies_used', 0)} Proxies im Einsatz)."
++                    )
++                    if counts.get("failed"):
++                        txt += f" {counts['failed']} fehlgeschlagen."
++                    yield ev("log", {"text": txt})
++                except HTTPException as exc:
++                    summary["auto_assigned"] = 0
++                    yield ev("log", {"text": f"Auto-Zuordnung übersprungen: {exc.detail}"})
++                except Exception as exc:
++                    summary["auto_assigned"] = 0
++                    yield ev("log", {"text": f"Auto-Zuordnung fehlgeschlagen: {str(exc)[:180]}"})
++
+             summary["finished_at"] = now_iso()
+             yield ev("done", summary)
+         except HTTPException as exc:
+@@ -1295,11 +1371,26 @@ async def push_selected(body: PushBody) -> dict[str, Any]:
+             pushed.append(entry)
+         else:
+             failed.append(fail)
++    # 3-Provider-Regel: nach jeder Übernahme die Verbindungen neu versorgen,
++    # damit neue Proxies sofort ihren Key-Instanzen zugewiesen sind.
++    auto_assigned = 0
++    auto_note = None
++    if pushed:
++        try:
++            assign_result = await assign_providers(AssignBody())
++            auto_assigned = assign_result.get("counts", {}).get("assigned", 0)
++        except HTTPException as exc:
++            auto_note = f"Auto-Zuordnung übersprungen: {exc.detail}"
++        except Exception as exc:
++            auto_note = f"Auto-Zuordnung fehlgeschlagen: {str(exc)[:160]}"
+     return {
+         "pushed": pushed,
+         "failed": failed,
+         "skipped": skipped,
+-        "counts": {"pushed": len(pushed), "failed": len(failed), "skipped": len(skipped)},
++        "auto_assigned": auto_assigned,
++        "auto_note": auto_note,
++        "counts": {"pushed": len(pushed), "failed": len(failed), "skipped": len(skipped),
++                   "auto_assigned": auto_assigned},
+     }
+ 
+ 
+@@ -1401,6 +1492,13 @@ async def tray_check(id: str) -> dict[str, Any]:
+         result["pushed"] = bool(entry)
+         if fail:
+             result["push_fail"] = fail
++        # Nach der Übernahme Verbindungen neu zuordnen (3-Provider-Regel).
++        if result["pushed"]:
++            try:
++                assign_result = await assign_providers(AssignBody())
++                result["auto_assigned"] = assign_result.get("counts", {}).get("assigned", 0)
++            except Exception:
++                result["auto_assigned"] = 0
+     if result["pushed"]:
+         bw_say(f"{result['host']}:{result['port']} lebt ({result['ms']} ms) — übernommen.")
+     elif result["risk"]:
+diff --git a/schaltwerk/static/index.html b/schaltwerk/static/index.html
+index e6f5ab3..2339ce5 100644
+--- a/schaltwerk/static/index.html
++++ b/schaltwerk/static/index.html
+@@ -421,10 +421,11 @@
+               <label>Gleichzeitig <input id="p-conc" type="number" value="16" min="1" max="40" /></label>
+               <label>Listen-Limit <input id="p-harvest" type="number" value="140" min="20" max="400" /></label>
+               <label>Max. schreiben <input id="p-push" type="number" value="25" min="1" max="80" /></label>
++              <label class="chk"><input id="p-autoassign" type="checkbox" checked /> Auto-Zuordnung (3-Provider-Regel)</label>
+             </div>
+           </details>
+           <button class="act" id="btn-push" disabled>Ausgewählte übernehmen</button>
+-          <button class="act" id="btn-assign">Provider zuordnen</button>
++          <button class="act" id="btn-assign" title="Jede aktive Connection (Key-Instanz) bekommt ihren eigenen Proxy — Connections desselben Providers round-robin über die besten Proxies">Proxies zuordnen (3-Provider-Regel)</button>
+         </div>
+ 
+         <div class="grid">
+@@ -786,6 +787,9 @@
+     /* ── Quellen ────────────────────────────────────────────── */
+     async function loadSources() {
+       const meta = await api("/api/meta");
++      // Gespeicherte Einstellungen ins Formular holen (Key bleibt serverseitig,
++      // wird nie an den Browser geschickt — nur has_key als Flag).
++      if (meta.settings?.omni_url) $("omni_url").value = meta.settings.omni_url;
+       $("src-list").innerHTML = (meta.sources || []).map((s) =>
+         `<label><input type="checkbox" value="${esc(s.id)}" checked /> ${esc(s.name)}</label>`).join("");
+       $("src-count").textContent = `(${meta.sources.length})`;
+@@ -939,6 +943,8 @@
+       try {
+         const data = await post("/api/push-selected", { proxies: chosen });
+         log(`Übernommen: ${data.counts.pushed} geschrieben · ${data.counts.skipped} übersprungen (nicht HTTPS-geprüft) · ${data.counts.failed} fehlgeschlagen.`);
++        if (data.counts.auto_assigned) log(`Auto-Zuordnung: ${data.counts.auto_assigned} Connections haben jetzt je einen eigenen Proxy.`);
++        if (data.auto_note) log(data.auto_note, true);
+         for (const f of data.failed || []) log(`Push fehlgeschlagen ${f.host}:${f.port} — ${f.error}`, true);
+         setPhase(`Übernahme fertig: ${data.counts.pushed} geschrieben.`);
+         state.selected = new Set();
+@@ -958,6 +964,7 @@
+         concurrency: parseInt($("p-conc").value, 10) || 16,
+         harvest_limit: parseInt($("p-harvest").value, 10) || 140,
+         max_push: parseInt($("p-push").value, 10) || 25,
++        auto_assign: $("p-autoassign").checked,
+       };
+     }
+     async function doExchange() {
+@@ -1042,20 +1049,19 @@
+     async function doAssign() {
+       const btn = $("btn-assign");
+       busy(btn, true, "Ordne …");
+-      setPhase("Ordne die besten Proxies den Providern zu …", true);
++      setPhase("Ordne jeder Connection ihren eigenen Proxy zu (3-Provider-Regel) …", true);
+       try {
+         const data = await post("/api/assign-providers", { count: 3 });
+-        log(`Provider: ${(data.providers || []).join(", ")} · beste: ${(data.best || []).join(", ")}`);
+-        for (const [pid, a] of Object.entries(data.assigned || {})) {
+-          const err = a.ok ? "" : ` — Fehler ${a.status}`;
+-          log(`Provider ${pid}: ${a.proxy}${err}`, Boolean(a.ok));
++        log(`Provider: ${(data.providers || []).join(", ")} · beste Proxies: ${(data.proxies || []).join(", ")}`);
++        for (const [prov, g] of Object.entries(data.groups || {})) {
++          const err = g.failed ? ` — ${g.failed} fehlgeschlagen` : "";
++          log(`Provider ${prov}: ${g.connections} Connection(s) → ${[...new Set(g.proxies)].join(", ")}${err}`, Boolean(g.failed));
+         }
+-        if (data.pool_mode === false && data.pool_mode_reason) log(data.pool_mode_reason);
+         const ver = Object.entries(data.verified || {});
+         if (ver.length) {
+-          log("Nachprüfung in OmniRoute (scope=provider):");
+-          for (const [pid, items] of ver) {
+-            log(`  ${pid}: ${(items || []).map((i) => i.proxy || i.proxy_id).join(", ") || "(keine Zuordnung)"}`);
++          log("Nachprüfung in OmniRoute (scope=account, pro Connection):");
++          for (const [cid, items] of ver) {
++            log(`  ${cid}: ${(items || []).join(", ") || "(keine Zuordnung)"}`);
+           }
+         }
+         setPhase("Zuordnung fertig.");
+diff --git a/schaltwerk/tests/test_server.py b/schaltwerk/tests/test_server.py
+index a88f318..edd3cb5 100644
+--- a/schaltwerk/tests/test_server.py
++++ b/schaltwerk/tests/test_server.py
+@@ -5,6 +5,7 @@ Läuft ohne Netz und ohne OmniRoute: pytest tests/
+ 
+ from __future__ import annotations
+ 
++import json
+ import sys
+ from pathlib import Path
+ 
+@@ -250,3 +251,168 @@ class TestTray:
+     def test_proxy_logs_ohne_key(self, client):
+         r = client.get("/api/omni/proxy-logs")
+         assert r.status_code == 400
++
++
++# ── 3-Provider-Regel: jede Connection (Key-Instanz) eigener Proxy ────
++
++class FakeResp:
++    def __init__(self, status_code=200, data=None, text=""):
++        self.status_code = status_code
++        self._data = data if data is not None else {}
++        self.text = text or json.dumps(self._data)
++
++    def json(self):
++        return self._data
++
++
++def _conn(cid, provider, active=True):
++    return {"id": cid, "provider": provider, "isActive": active}
++
++
++def _px(i, ms):
++    return {
++        "id": f"px{i}", "name": f"px-de-1.2.3.{i}", "host": f"1.2.3.{i}", "port": 8080,
++        "type": "http", "status": "active",
++        "notes": f"proxy-exchange https_ok latency={ms}ms exit=1.2.3.{i}",
++    }
++
++
++class TestDreiProviderRegel:
++    def test_jede_connection_eigener_proxy_scope_account(self, client, monkeypatch):
++        """6 Connections (2 Provider × 3 Keys) und 3 Proxies → jede Connection
++        bekommt per scope=account ihren eigenen Proxy; die 3 Keys eines
++        Providers bekommen 3 VERSCHIEDENE Proxies (verschiedene Exit-IPs)."""
++        server.settings["api_key"] = "test-key"
++        connections = [
++            _conn("c-or-1", "openrouter"), _conn("c-or-2", "openrouter"), _conn("c-or-3", "openrouter"),
++            _conn("c-gq-1", "groq"), _conn("c-gq-2", "groq"), _conn("c-gq-3", "groq"),
++        ]
++        registry = [_px(1, 100), _px(2, 200), _px(3, 300)]
++        calls: list[tuple] = []
++
++        async def fake_providers():
++            return connections
++
++        async def fake_registry():
++            return registry
++
++        async def fake_request(method, path, **kw):
++            calls.append((method, path, kw.get("json")))
++            if method == "PUT" and "bulk-assign" in path:
++                return FakeResp(200, {"success": True, "updated": 1})
++            if method == "GET" and "assignments" in path:
++                return FakeResp(200, {"items": []})
++            return FakeResp(200, {})
++
++        monkeypatch.setattr(server, "list_providers", fake_providers)
++        monkeypatch.setattr(server, "list_management_proxies", fake_registry)
++        monkeypatch.setattr(server, "omni_request", fake_request)
++
++        r = client.post("/api/assign-providers", json={})
++        assert r.status_code == 200
++        body = r.json()
++        assert body["counts"]["assigned"] == 6
++        assert body["counts"]["failed"] == 0
++        assert body["counts"]["proxies_used"] == 3
++
++        # Alle Zuordnungen auf Connection-Ebene (scope=account)
++        puts = [c for c in calls if c[0] == "PUT" and "bulk-assign" in c[1]]
++        assert len(puts) == 6
++        for _, _, payload in puts:
++            assert payload["scope"] == "account"
++            assert len(payload["scopeIds"]) == 1
++
++        # Die 3 openrouter-Keys bekommen 3 verschiedene Proxies
++        or_proxies = {p["proxy_id"] for cid, p in body["assigned"].items() if cid.startswith("c-or")}
++        assert or_proxies == {"px1", "px2", "px3"}
++
++    def test_inaktive_connections_werden_uebersprungen(self, client, monkeypatch):
++        server.settings["api_key"] = "test-key"
++        connections = [_conn("c-on", "openrouter", active=True), _conn("c-off", "openrouter", active=False)]
++        calls: list[tuple] = []
++
++        async def fake_providers():
++            return connections
++
++        async def fake_registry():
++            return [_px(1, 100)]
++
++        async def fake_request(method, path, **kw):
++            calls.append((method, path, kw.get("json")))
++            if method == "PUT":
++                return FakeResp(200, {"success": True})
++            if method == "GET":
++                return FakeResp(200, {"items": []})
++            return FakeResp(200, {})
++
++        monkeypatch.setattr(server, "list_providers", fake_providers)
++        monkeypatch.setattr(server, "list_management_proxies", fake_registry)
++        monkeypatch.setattr(server, "omni_request", fake_request)
++
++        r = client.post("/api/assign-providers", json={})
++        assert r.status_code == 200
++        assert r.json()["counts"]["connections"] == 1  # nur die aktive
++        put_targets = [c[2]["scopeIds"][0] for c in calls if c[0] == "PUT"]
++        assert put_targets == ["c-on"]
++
++    def test_mehr_connections_als_proxies_round_robin(self, client, monkeypatch):
++        """5 Keys, aber nur 2 Proxies → round-robin: Key 4 teilt mit Key 1."""
++        server.settings["api_key"] = "test-key"
++        connections = [_conn(f"c-{i}", "openrouter") for i in range(5)]
++
++        async def fake_providers():
++            return connections
++
++        async def fake_registry():
++            return [_px(1, 100), _px(2, 200)]
++
++        async def fake_request(method, path, **kw):
++            if method == "PUT":
++                return FakeResp(200, {"success": True})
++            return FakeResp(200, {"items": []} if method == "GET" else {})
++
++        monkeypatch.setattr(server, "list_providers", fake_providers)
++        monkeypatch.setattr(server, "list_management_proxies", fake_registry)
++        monkeypatch.setattr(server, "omni_request", fake_request)
++
++        r = client.post("/api/assign-providers", json={})
++        assigned = r.json()["assigned"]
++        assert [assigned[f"c-{i}"]["proxy_id"] for i in range(5)] == ["px1", "px2", "px1", "px2", "px1"]
++
++
++class TestConfigPersistenz:
++    """URL + Key liegen wie bei üblichen Apps im Benutzerverzeichnis."""
++
++    def test_roundtrip_speichern_und_laden(self, tmp_path, monkeypatch):
++        cfg = tmp_path / "config.json"
++        monkeypatch.setattr(server, "config_path", lambda: cfg)
++        server.settings["omni_url"] = "http://127.0.0.1:20128"
++        server.settings["api_key"] = "key-123"
++        server.save_config()
++        assert cfg.exists()
++        # Zustand "verloren" (Neustart simulieren) → laden stellt wieder her
++        server.settings["api_key"] = ""
++        server.settings["omni_url"] = "http://x"
++        server.load_config()
++        assert server.settings["api_key"] == "key-123"
++        assert server.settings["omni_url"] == "http://127.0.0.1:20128"
++
++    def test_connect_speichert_nur_bei_erfolg(self, client, monkeypatch, tmp_path):
++        cfg = tmp_path / "config.json"
++        monkeypatch.setattr(server, "config_path", lambda: cfg)
++
++        async def fake_ok(method, path, **kw):
++            return FakeResp(200, {"items": []})
++
++        monkeypatch.setattr(server, "omni_request", fake_ok)
++        client.post("/api/connect", json={"omni_url": "http://127.0.0.1:20128", "api_key": "guter-key"})
++        assert cfg.exists()
++        assert json.loads(cfg.read_text())["api_key"] == "guter-key"
++
++        # Fehlgeschlagener Connect (403) darf den gespeicherten Key NICHT überschreiben
++        async def fake_bad(method, path, **kw):
++            return FakeResp(403, text="Invalid management token")
++
++        monkeypatch.setattr(server, "omni_request", fake_bad)
++        client.post("/api/connect", json={"omni_url": "http://127.0.0.1:20128", "api_key": "schlechter-key"})
++        assert json.loads(cfg.read_text())["api_key"] == "guter-key"
