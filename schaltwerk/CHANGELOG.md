@@ -17,26 +17,6 @@ nächsten Stand nach unten in eine Versionsnummer verschoben.
 
 ### Hinzugefügt
 
-- **3-Provider-Regel — Zuordnung auf Connection-Ebene:** „Proxies zuordnen"
-  ordnet jetzt JEDER aktiven Connection (Key-Instanz) ihren EIGENEN Proxy zu
-  (`scope=account`, `scopeId=connectionId`) statt einen Proxy pro Provider
-  (`scope=provider`). Connections desselben Providers (der Nutzer legt jeden
-  Key üblicherweise 3× an) bekommen round-robin die besten px-*-Proxies —
-  3 Keys = 3 verschiedene Exit-IPs. Inaktive Connections werden übersprungen.
-- **Auto-Zuordnung:** Nach jedem Austausch (manuell UND geplant über den
-  Scheduler), nach „Ausgewählte übernehmen" und nach der Ablage-Prüfung werden
-  die Verbindungen automatisch neu zugeordnet — kein Button-Klick mehr nötig.
-  Im Parameter-Menü abschaltbar („Auto-Zuordnung").
-- **Persistente Verbindungseinstellungen:** OmniRoute-URL und Management-API-Key
-  werden wie bei üblichen Anwendungen im Benutzerverzeichnis gespeichert
-  (Windows: `%APPDATA%\Schaltwerk\config.json`, Linux:
-  `~/.config/schaltwerk/config.json`) — nicht im Repo, nicht im Programmordner.
-  Gespeichert wird nur bei erfolgreichem Connect; nach dem Start verbindet
-  Schaltwerk automatisch. Der Key wird nie an den Browser geschickt (nur
-  `has_key`-Flag). Entfernen: Datei löschen.
-
-### Geändert
-
 - **Bad Wolf wird wach:** Wachdienst beim Serverstart (Bereitschaftsmeldung
   mit Pool-/Register-Stand, bzw. „aber blind" ohne Key), Begrüßung nach dem
   ersten erfolgreichen Connect, und ein Beobachter, der alle 60 s den

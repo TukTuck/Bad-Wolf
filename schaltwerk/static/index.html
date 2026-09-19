@@ -421,11 +421,10 @@
               <label>Gleichzeitig <input id="p-conc" type="number" value="16" min="1" max="40" /></label>
               <label>Listen-Limit <input id="p-harvest" type="number" value="140" min="20" max="400" /></label>
               <label>Max. schreiben <input id="p-push" type="number" value="25" min="1" max="80" /></label>
-              <label class="chk"><input id="p-autoassign" type="checkbox" checked /> Auto-Zuordnung (3-Provider-Regel)</label>
             </div>
           </details>
           <button class="act" id="btn-push" disabled>Ausgewählte übernehmen</button>
-          <button class="act" id="btn-assign" title="Jede aktive Connection (Key-Instanz) bekommt ihren eigenen Proxy — Connections desselben Providers round-robin über die besten Proxies">Proxies zuordnen (3-Provider-Regel)</button>
+          <button class="act" id="btn-assign">Provider zuordnen</button>
         </div>
 
         <div class="grid">
@@ -787,9 +786,6 @@
     /* ── Quellen ────────────────────────────────────────────── */
     async function loadSources() {
       const meta = await api("/api/meta");
-      // Gespeicherte Einstellungen ins Formular holen (Key bleibt serverseitig,
-      // wird nie an den Browser geschickt — nur has_key als Flag).
-      if (meta.settings?.omni_url) $("omni_url").value = meta.settings.omni_url;
       $("src-list").innerHTML = (meta.sources || []).map((s) =>
         `<label><input type="checkbox" value="${esc(s.id)}" checked /> ${esc(s.name)}</label>`).join("");
       $("src-count").textContent = `(${meta.sources.length})`;
@@ -943,8 +939,6 @@
       try {
         const data = await post("/api/push-selected", { proxies: chosen });
         log(`Übernommen: ${data.counts.pushed} geschrieben · ${data.counts.skipped} übersprungen (nicht HTTPS-geprüft) · ${data.counts.failed} fehlgeschlagen.`);
-        if (data.counts.auto_assigned) log(`Auto-Zuordnung: ${data.counts.auto_assigned} Connections haben jetzt je einen eigenen Proxy.`);
-        if (data.auto_note) log(data.auto_note, true);
         for (const f of data.failed || []) log(`Push fehlgeschlagen ${f.host}:${f.port} — ${f.error}`, true);
         setPhase(`Übernahme fertig: ${data.counts.pushed} geschrieben.`);
         state.selected = new Set();
@@ -964,7 +958,6 @@
         concurrency: parseInt($("p-conc").value, 10) || 16,
         harvest_limit: parseInt($("p-harvest").value, 10) || 140,
         max_push: parseInt($("p-push").value, 10) || 25,
-        auto_assign: $("p-autoassign").checked,
       };
     }
     async function doExchange() {
@@ -1049,19 +1042,20 @@
     async function doAssign() {
       const btn = $("btn-assign");
       busy(btn, true, "Ordne …");
-      setPhase("Ordne jeder Connection ihren eigenen Proxy zu (3-Provider-Regel) …", true);
+      setPhase("Ordne die besten Proxies den Providern zu …", true);
       try {
         const data = await post("/api/assign-providers", { count: 3 });
-        log(`Provider: ${(data.providers || []).join(", ")} · beste Proxies: ${(data.proxies || []).join(", ")}`);
-        for (const [prov, g] of Object.entries(data.groups || {})) {
-          const err = g.failed ? ` — ${g.failed} fehlgeschlagen` : "";
-          log(`Provider ${prov}: ${g.connections} Connection(s) → ${[...new Set(g.proxies)].join(", ")}${err}`, Boolean(g.failed));
+        log(`Provider: ${(data.providers || []).join(", ")} · beste: ${(data.best || []).join(", ")}`);
+        for (const [pid, a] of Object.entries(data.assigned || {})) {
+          const err = a.ok ? "" : ` — Fehler ${a.status}`;
+          log(`Provider ${pid}: ${a.proxy}${err}`, Boolean(a.ok));
         }
+        if (data.pool_mode === false && data.pool_mode_reason) log(data.pool_mode_reason);
         const ver = Object.entries(data.verified || {});
         if (ver.length) {
-          log("Nachprüfung in OmniRoute (scope=account, pro Connection):");
-          for (const [cid, items] of ver) {
-            log(`  ${cid}: ${(items || []).join(", ") || "(keine Zuordnung)"}`);
+          log("Nachprüfung in OmniRoute (scope=provider):");
+          for (const [pid, items] of ver) {
+            log(`  ${pid}: ${(items || []).map((i) => i.proxy || i.proxy_id).join(", ") || "(keine Zuordnung)"}`);
           }
         }
         setPhase("Zuordnung fertig.");

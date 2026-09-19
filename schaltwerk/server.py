@@ -236,45 +236,6 @@ settings: dict[str, Any] = {
     "api_key": "",
 }
 
-
-# ── Persistente Verbindungseinstellungen ────────────────────────────
-# URL + API-Key liegen wie bei üblichen Anwendungen im Benutzerverzeichnis
-# (Windows: %APPDATA%\Schaltwerk\config.json, sonst ~/.config/schaltwerk/),
-# NICHT neben dem Code — nichts landet so in Repo, Backups des Programmordners
-# oder geteilten Ordnern. Bei Fehlen der Datei: RAM-only wie bisher.
-def config_path() -> Path:
-    if sys.platform == "win32":
-        base = Path(os.environ.get("APPDATA") or (Path.home() / "AppData" / "Roaming"))
-        return base / "Schaltwerk" / "config.json"
-    base = Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config"))
-    return base / "schaltwerk" / "config.json"
-
-
-def load_config() -> None:
-    try:
-        data = json.loads(config_path().read_text(encoding="utf-8"))
-    except Exception:
-        return  # keine/defekte Config → Defaults, RAM-only
-    if isinstance(data, dict):
-        if data.get("omni_url"):
-            settings["omni_url"] = str(data["omni_url"])
-        settings["api_key"] = str(data.get("api_key") or "")
-
-
-def save_config() -> None:
-    try:
-        p = config_path()
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(
-            json.dumps({"omni_url": settings["omni_url"], "api_key": settings["api_key"]}, indent=2),
-            encoding="utf-8",
-        )
-    except Exception as exc:  # niemals den Betrieb wegen einer Config blockieren
-        print(f"[config] Speichern fehlgeschlagen: {exc}", flush=True)
-
-
-load_config()
-
 # Letzter/laufender Austausch-Job — für GET /api/job-status und Server-Logging.
 job_state: dict[str, Any] = {
     "running": False,
@@ -679,22 +640,15 @@ def proxy_latency_ms(p: dict[str, Any]) -> int:
     return int(m.group(1)) if m else 9_999
 
 
-async def assign_proxy_bulk(proxy_id: str, scope: str, scope_ids: list[str]) -> httpx.Response:
+async def assign_proxy_to_providers(
+    proxy_id: str, scope: str, scope_ids: list[str]
+) -> httpx.Response:
     """PUT bulk-assign; falls die Version POST erwartet (Doku), Retry mit POST."""
     payload = {"scope": scope, "scopeIds": scope_ids, "proxyId": proxy_id}
     resp = await omni_request("PUT", "/api/v1/management/proxies/bulk-assign", json=payload)
     if resp.status_code == 405:
         resp = await omni_request("POST", "/api/v1/management/proxies/bulk-assign", json=payload)
     return resp
-
-
-async def assign_proxy_to_connection(proxy_id: str, connection_id: str) -> httpx.Response:
-    """3-Provider-Regel: JEDER Key-Instanz (Connection) ihren EIGENEN Proxy
-    zuordnen — auf Connection-Ebene (scope=account, scopeId=connectionId),
-    nicht auf Provider-Ebene. OmniRoutes Resolver greift pro Connection auf
-    den account-Pool zu (account → provider → global), sodass 3 angelegte
-    Keys desselben Providers 3 verschiedene Exit-IPs bekommen."""
-    return await assign_proxy_bulk(proxy_id, "account", [connection_id])
 
 
 class ConnectBody(BaseModel):
@@ -729,7 +683,6 @@ class ExchangeBody(BaseModel):
     remove_dead_harvest: bool = True
     push_live: bool = True
     check_oneproxy: bool = True
-    auto_assign: bool = True
     sources: list[str] | None = None
     types: list[str] | None = None
 
@@ -791,12 +744,8 @@ async def connect(body: ConnectBody) -> dict[str, Any]:
         except Exception:
             pass
 
-    if reachable and auth_ok:
-        # Erfolgreiche Verbindung dauerhaft im Benutzerverzeichnis ablegen —
-        # nach dem nächsten Start ist Schaltwerk automatisch verbunden.
-        save_config()
-        if not had_key:
-            bw_say("Verbunden. Ich sehe alles.")
+    if reachable and auth_ok and not had_key:
+        bw_say("Verbunden. Ich sehe alles.")
     return {
         "ok": bool(reachable and auth_ok),
         "reachable": reachable,
@@ -903,120 +852,119 @@ async def check(body: CheckBody) -> dict[str, Any]:
 
 @app.post("/api/assign-providers")
 async def assign_providers(body: AssignBody) -> dict[str, Any]:
-    """3-Provider-Regel: Jede AKTIVE Connection (= eine Key-Instanz; der Nutzer
-    legt jeden Provider-Key üblicherweise 3× an) bekommt ihren EIGENEN Proxy —
-    zugeordnet auf Connection-Ebene (scope=account), nicht auf Provider-Ebene.
-    Connections desselben Providers bilden eine Gruppe und bekommen
-    round-robin die besten px-*-Proxies, damit die 3 Keys einer Gruppe
-    3 verschiedene Exit-IPs haben (Egress-Diversität statt geteilter IP)."""
+    """Ordnet die besten eigenen px-*-Proxies allen installierten Providern zu
+    (scope=provider). Prüft zur Laufzeit, ob die OmniRoute-Version mehrere
+    Proxies pro Scope (Pool) via API zulässt; sonst gilt 1 Proxy pro Provider.
+    """
     if not (settings.get("api_key") or "").strip():
         raise HTTPException(400, "Zuerst mit OmniRoute verbinden (API-Key mit manage-Scope eintragen).")
     count = max(1, min(body.count, 8))
 
     connections = await list_providers()
-    # Nur aktive Connections versorgen — inaktive Keys sollen nicht routen.
-    active = [
-        c for c in connections
-        if c.get("id") and c.get("isActive") is not False
-    ]
     if body.providers:
-        wanted = {p.strip().lower() for p in body.providers if p.strip()}
-        active = [c for c in active if str(c.get("provider") or "").strip().lower() in wanted]
-    if not active:
-        raise HTTPException(400, "Keine aktiven Provider-Connections gefunden (GET /api/providers leer oder alles inaktiv).")
+        provider_ids = [p.strip().lower() for p in body.providers if p.strip()]
+    else:
+        seen: set[str] = set()
+        provider_ids = []
+        for c in connections:
+            pid = str(c.get("provider") or "").strip().lower()
+            if pid and pid not in seen:
+                seen.add(pid)
+                provider_ids.append(pid)
+    if not provider_ids:
+        raise HTTPException(400, "Keine installierten Provider gefunden (GET /api/providers leer).")
 
     registry = await list_management_proxies()
-    pool = [
+    harvest = [
         p
         for p in registry
         if is_harvest(p)
-        and str(p.get("status") or "active").lower() not in ("inactive", "dead", "down", "error", "disabled")
+        and str(p.get("status") or "active") != "inactive"
         and p.get("id")
         and p.get("host")
         and p.get("port")
     ]
-    pool.sort(key=proxy_latency_ms)
-    best = pool[:count]
+    harvest.sort(key=proxy_latency_ms)
+    best = harvest[:count]
     if not best:
         raise HTTPException(400, "Keine eigenen Austausch-Proxies (px-*) im Register gefunden.")
 
     def short(p: dict[str, Any]) -> str:
         return f"{p['host']}:{p['port']}"
 
-    # Gruppen: Connections desselben Providers = die Key-Instanzen eines
-    # Providers (i. d. R. 3). Innerhalb der Gruppe round-robin über `best`.
-    groups: dict[str, list[dict[str, Any]]] = {}
-    for c in active:
-        groups.setdefault(str(c.get("provider") or "?"), []).append(c)
-
     results: dict[str, Any] = {
-        "providers": sorted(groups),
-        "proxies": [short(p) for p in best],
+        "providers": provider_ids,
+        "best": [short(p) for p in best],
         "assigned": {},
-        "failed": {},
-        "groups": {},
+        "pool_mode": None,
+        "pool_mode_reason": None,
     }
 
-    for provider, conns in sorted(groups.items()):
-        g: dict[str, Any] = {"connections": len(conns), "proxies": [], "ok": 0, "failed": 0}
-        for i, c in enumerate(conns):
-            proxy = best[i % len(best)]
-            resp = await assign_proxy_to_connection(str(proxy["id"]), str(c["id"]))
-            ok = resp.status_code < 400
-            if ok:
-                g["ok"] += 1
-                g["proxies"].append(short(proxy))
-                results["assigned"][str(c["id"])] = {
-                    "provider": provider,
-                    "connection": str(c["id"]),
-                    "proxy": short(proxy),
-                    "proxy_id": proxy.get("id"),
-                }
-            else:
-                g["failed"] += 1
-                g["proxies"].append(f"FEHLER HTTP {resp.status_code}")
-                results["failed"][str(c["id"])] = {
-                    "provider": provider,
-                    "connection": str(c["id"]),
-                    "proxy": short(proxy),
-                    "status": resp.status_code,
-                    "detail": resp.text[:200],
-                }
-        results["groups"][provider] = g
+    # 1) Besten Proxy jedem Provider zuordnen (dokumentierte Semantik).
+    for pid in provider_ids:
+        resp = await assign_proxy_to_providers(best[0]["id"], "provider", [pid])
+        results["assigned"][pid] = {
+            "proxy": short(best[0]),
+            "ok": resp.status_code < 400,
+            "status": resp.status_code,
+            "detail": resp.text[:200] if resp.status_code >= 400 else "",
+        }
 
-    # Nachprüfen (Stichprobe): steht die Zuordnung wirklich in OmniRoute?
+    # 2) Mehrfach-Zuordnung (Pool) ausprobieren: klappt es, bekommt jeder
+    #    Provider bis zu `count` Proxies; sonst besten Proxy wiederherstellen.
+    if len(best) > 1:
+        probe_pid = provider_ids[0]
+        probe = await assign_proxy_to_providers(best[1]["id"], "provider", [probe_pid])
+        assign_resp = await omni_request(
+            "GET",
+            f"/api/v1/management/proxies/assignments?scope=provider&scope_id={probe_pid}&limit=50",
+        )
+        try:
+            items = assign_resp.json().get("items") or []
+        except Exception:
+            items = []
+        best_ids = {p["id"] for p in best}
+        mine = [it for it in items if it.get("proxyId") in best_ids]
+        if probe.status_code < 400 and len(mine) >= 2:
+            results["pool_mode"] = True
+            for pid in provider_ids:
+                pool = []
+                for proxy in best[1:]:
+                    r = await assign_proxy_to_providers(proxy["id"], "provider", [pid])
+                    pool.append({"proxy": short(proxy), "ok": r.status_code < 400, "status": r.status_code})
+                results["assigned"][pid]["pool"] = pool
+        else:
+            results["pool_mode"] = False
+            await assign_proxy_to_providers(best[0]["id"], "provider", [probe_pid])
+            results["assigned"][probe_pid]["proxy"] = short(best[0])
+            results["pool_mode_reason"] = (
+                "Diese OmniRoute-Version ordnet via API nur 1 Proxy pro Scope zu (Replace-Semantik). "
+                "Für einen Mehrfach-Pool im OmniRoute-Dashboard zuordnen."
+            )
+
+    # 3) Nachprüfen: was steht jetzt tatsächlich in OmniRoute (scope=provider)?
     verified: dict[str, Any] = {}
-    by_id = {str(p["id"]): short(p) for p in pool}
-    for c in active[:5]:
+    by_id = {p["id"]: short(p) for p in harvest}
+    for pid in provider_ids:
         ar = await omni_request(
             "GET",
-            f"/api/v1/management/proxies/assignments?scope=account&scope_id={c['id']}&limit=10",
+            f"/api/v1/management/proxies/assignments?scope=provider&scope_id={pid}&limit=50",
         )
         try:
             items = ar.json().get("items") or []
         except Exception:
             items = []
-        verified[str(c["id"])[:8]] = [
-            by_id.get(str(it.get("proxyId")), str(it.get("proxyId")))
+        verified[pid] = [
+            {"proxy_id": it.get("proxyId"), "proxy": by_id.get(it.get("proxyId"), "?")}
             for it in items
-            if it.get("scopeId") == c["id"]
+            if it.get("scopeId") == pid
         ]
     results["verified"] = verified
 
     results["counts"] = {
-        "connections": len(active),
-        "assigned": len(results["assigned"]),
-        "failed": len(results["failed"]),
-        "proxies_used": len(best),
-        "providers": len(groups),
+        "providers": len(provider_ids),
+        "proxies_used": len(best) if results["pool_mode"] else 1,
     }
-    if results["counts"]["failed"]:
-        bw_say(
-            f"{results['counts']['assigned']} Verbindungen haben einen eigenen Proxy — "
-            f"{results['counts']['failed']} sind gescheitert."
-        )
-    else:
-        bw_say(f"Ich habe {results['counts']['assigned']} Verbindungen jeweils einen eigenen Proxy gegeben.")
     return results
 
 
@@ -1231,30 +1179,6 @@ async def _exchange_events(body: ExchangeBody):
                         summary["failed_push"].append(fail)
                         yield ev("push_fail", fail)
 
-            # 3-Provider-Regel: nach jedem Austausch automatisch JEDER aktiven
-            # Connection ihren eigenen Proxy geben — ohne Button-Klick. Läuft
-            # damit auch im geplanten Austausch (Scheduler) selbständig.
-            if body.auto_assign:
-                yield ev("phase", {"step": "assign", "label": "Proxies automatisch zuordnen (3-Provider-Regel)"})
-                try:
-                    assign_result = await assign_providers(AssignBody())
-                    counts = assign_result.get("counts", {})
-                    summary["auto_assigned"] = counts.get("assigned", 0)
-                    txt = (
-                        f"Auto-Zuordnung: {counts.get('assigned', 0)} von {counts.get('connections', 0)} "
-                        f"Connections haben jetzt je einen eigenen Proxy "
-                        f"({counts.get('proxies_used', 0)} Proxies im Einsatz)."
-                    )
-                    if counts.get("failed"):
-                        txt += f" {counts['failed']} fehlgeschlagen."
-                    yield ev("log", {"text": txt})
-                except HTTPException as exc:
-                    summary["auto_assigned"] = 0
-                    yield ev("log", {"text": f"Auto-Zuordnung übersprungen: {exc.detail}"})
-                except Exception as exc:
-                    summary["auto_assigned"] = 0
-                    yield ev("log", {"text": f"Auto-Zuordnung fehlgeschlagen: {str(exc)[:180]}"})
-
             summary["finished_at"] = now_iso()
             yield ev("done", summary)
         except HTTPException as exc:
@@ -1371,26 +1295,11 @@ async def push_selected(body: PushBody) -> dict[str, Any]:
             pushed.append(entry)
         else:
             failed.append(fail)
-    # 3-Provider-Regel: nach jeder Übernahme die Verbindungen neu versorgen,
-    # damit neue Proxies sofort ihren Key-Instanzen zugewiesen sind.
-    auto_assigned = 0
-    auto_note = None
-    if pushed:
-        try:
-            assign_result = await assign_providers(AssignBody())
-            auto_assigned = assign_result.get("counts", {}).get("assigned", 0)
-        except HTTPException as exc:
-            auto_note = f"Auto-Zuordnung übersprungen: {exc.detail}"
-        except Exception as exc:
-            auto_note = f"Auto-Zuordnung fehlgeschlagen: {str(exc)[:160]}"
     return {
         "pushed": pushed,
         "failed": failed,
         "skipped": skipped,
-        "auto_assigned": auto_assigned,
-        "auto_note": auto_note,
-        "counts": {"pushed": len(pushed), "failed": len(failed), "skipped": len(skipped),
-                   "auto_assigned": auto_assigned},
+        "counts": {"pushed": len(pushed), "failed": len(failed), "skipped": len(skipped)},
     }
 
 
@@ -1492,13 +1401,6 @@ async def tray_check(id: str) -> dict[str, Any]:
         result["pushed"] = bool(entry)
         if fail:
             result["push_fail"] = fail
-        # Nach der Übernahme Verbindungen neu zuordnen (3-Provider-Regel).
-        if result["pushed"]:
-            try:
-                assign_result = await assign_providers(AssignBody())
-                result["auto_assigned"] = assign_result.get("counts", {}).get("assigned", 0)
-            except Exception:
-                result["auto_assigned"] = 0
     if result["pushed"]:
         bw_say(f"{result['host']}:{result['port']} lebt ({result['ms']} ms) — übernommen.")
     elif result["risk"]:
