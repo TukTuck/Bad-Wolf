@@ -4,15 +4,6 @@ Stand: 2026-08-12
 Plattform-Ziel: Windows 10 (läuft auch unter Linux)
 Sprache der Oberfläche: Deutsch
 
-> **UPDATE (Stand Bad-Wolf-Repo, 2026-09):** Der Abschnitt API-KEY-HANDLING
-> weiter unten ist HISTORISCH. Die RAM-only-Entscheidung wurde vom PO geändert:
-> URL + Key liegen jetzt im **Benutzerverzeichnis** (Windows:
-> `%APPDATA%\Schaltwerk\config.json`), gespeichert nur bei erfolgreichem
-> Connect, Auto-Connect beim Start. Neu ist außerdem die **3-Provider-Regel**
-> (Zuordnung auf Connection-Ebene, `scope=account`) und die **Auto-Zuordnung**
-> nach jedem Austausch — Details: CHANGELOG.md [Unreleased].
-
-
 
 ══════════════════════════════════════════════════════════════════
 WAS DAS IST
